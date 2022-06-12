@@ -1,4 +1,4 @@
-FROM python:3
+FROM python:3.10
 
 ADD p1serial.py /
 RUN pip install pyserial influxdb

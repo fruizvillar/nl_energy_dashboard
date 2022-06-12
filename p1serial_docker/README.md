@@ -1,7 +1,7 @@
 # built
 Create a (Docker) image, see attached Dockerfile  
 ```
-docker build -t jeroenboot/p1serial .
+docker build -t p1serial/p1serial .
 ```
 
 # run
@@ -12,9 +12,9 @@ docker run \
  --detach \
  --net=host \
  --name=p1serial \
- --device /dev/ttyAMA0:/dev/ttyAMA0 \
+ --device /dev/ttyUSB0:/dev/ttyUSB0 \
  -e PYTHONUNBUFFERED=0 \
- jeroenboot/p1serial
+ p1serial/p1serial
 ```
 
 # check
