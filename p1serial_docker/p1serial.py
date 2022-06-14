@@ -26,8 +26,6 @@ DRM4_LINE_SEP = '\r\n'
 TZ_DRM4 = pytz.timezone("Europe/Amsterdam")
 TZ_INFLUX = pytz.utc
 
-INTERVAL = 0  # DRM4 Counters already
-LOOP = True
 
 drm4_crc = crcmod.mkCrcFun(0x18005, rev=False)  # FIXME: Find the way in which
 
@@ -75,6 +73,8 @@ class Drm4ReaderUploader:
     SerialConfig = dict(port='/dev/ttyUSB0', baudrate=115200, timeout=20)
     InfluxDbConfig = dict(username='admin', password='admin', database='p1data')
 
+    InfLoopInterval = 0
+
     def __init__(self):
         self.serial = serial.Serial(**self.SerialConfig)
         self.influx = InfluxDBClient(**self.InfluxDbConfig)
@@ -82,7 +82,9 @@ class Drm4ReaderUploader:
         self.last_dt_gas = None
         self.last_dt_electricity = None
 
-    def _init_dts(self):
+        self._init_datetime_fields()
+
+    def _init_datetime_fields(self):
         if res := list(self.influx.query('SELECT time, gas_time FROM p1 ORDER BY time DESC LIMIT 1').get_points('p1')):
             self.last_dt_gas = TZ_INFLUX.localize(datetime.strptime(res[0]['gas_time'], INFLUX_DT_FMT))
 
@@ -181,34 +183,34 @@ class Drm4ReaderUploader:
         return telegram_info
 
     def loop(self):
-
+        """ Runs `run` in a loop"""
         while True:
-            fields = self.parse_telegram()
+            self.run()
+            if self.InfLoopInterval:
+                time.sleep(self.InfLoopInterval)
 
-            if not fields:
-                raise RuntimeError('Unknown error: datagram could not be parsed')
+    def run(self):
+        fields = self.parse_telegram()
 
-            if not (last_dt_electricity := fields.pop('dt_electricity', self.last_dt_electricity)):
-                raise RuntimeError('Unknown error: datagram could not be parsed', fields)
+        if not fields:
+            raise RuntimeError('Unknown error: datagram could not be parsed')
 
-            tags = dict(tariff=fields.pop('tariff_indicator', None))
+        if not (last_dt_electricity := fields.pop('dt_electricity', self.last_dt_electricity)):
+            raise RuntimeError('Unknown error: datagram could not be parsed', fields)
 
-            # Create the JSON data structure for InfluxDB
-            data = {
-                "measurement": IDB_MEASUREMENT,
-                "fields": fields,
-                "tags": tags,
-                "time": last_dt_electricity
-            }
+        tags = dict(tariff=fields.pop('tariff_indicator', None))
 
-            # Send the JSON data to InfluxDB
-            self.influx.write_points([data], time_precision='s')
-            logging.info(data)
-            if LOOP:
-                if INTERVAL:
-                    time.sleep(INTERVAL)
-            else:
-                break
+        # Create the JSON data structure for InfluxDB
+        data = {
+            "measurement": IDB_MEASUREMENT,
+            "fields": fields,
+            "tags": tags,
+            "time": last_dt_electricity
+        }
+
+        # Send the JSON data to InfluxDB
+        self.influx.write_points([data], time_precision='s')
+        logging.info(data)
 
     @staticmethod
     def _parse_dt_to_utc(dt_naive_f: str):
