@@ -1,108 +1,164 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
+"""P1 serial publisher: reads DSMR P1 telegrams and publishes them to RabbitMQ."""
+import json
 import logging
+import os
 import re
 import time
-
 from datetime import datetime
 from enum import Enum
-from logging.handlers import TimedRotatingFileHandler
 
 import crcmod
+import pika
 import pytz
 import serial
 
-from influxdb import InfluxDBClient
+# ---------------------------------------------------------------------------
+# Configuration (via environment variables with sensible defaults)
+# ---------------------------------------------------------------------------
+SERIAL_PORT = os.getenv('SERIAL_PORT', '/dev/ttyUSB0')
+SERIAL_BAUD = int(os.getenv('SERIAL_BAUD', '115200'))
+SERIAL_TIMEOUT = int(os.getenv('SERIAL_TIMEOUT', '20'))
 
-# Create the InfluxDB client object
-IDB_MEASUREMENT = "p1data"
+RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
+RABBITMQ_PORT = int(os.getenv('RABBITMQ_PORT', '5672'))
+RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'guest')
+RABBITMQ_PASS = os.getenv('RABBITMQ_PASS', 'guest')
+RABBITMQ_QUEUE = os.getenv('RABBITMQ_QUEUE', 'p1data')
 
-tel_id_re = re.compile(r'(\d+)-(\d+):(\d+)\.(\d+)\.(\d+)')
+IDB_MEASUREMENT = 'p1data'
 
-tel_content_re_extra = re.compile(r'\(([\d.]*)[^)]*\)\(?([\d.]+)?')
-
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 DRM4_DT_FMT = '%y%m%d%H%M%S'
 INFLUX_DT_FMT = '%Y-%m-%dT%H:%M:%SZ'
 DRM4_LINE_SEP = '\r\n'
-TZ_DRM4 = pytz.timezone("Europe/Amsterdam")
+TZ_DRM4 = pytz.timezone('Europe/Amsterdam')
 TZ_INFLUX = pytz.utc
 
+tel_id_re = re.compile(r'(\d+)-(\d+):(\d+)\.(\d+)\.(\d+)')
+tel_values_re = re.compile(r'\(([^)]*)\)')
+numeric_re = re.compile(r'^[\d.]+')
 
-drm4_crc = crcmod.mkCrcFun(0x18005, rev=False)  # FIXME: Find the way in which
+drm4_crc = crcmod.mkCrcFun(0x18005, rev=False)
 
 logging.basicConfig(
-    handlers=[TimedRotatingFileHandler('/home/pi/p1/log/main.log', when='D', backupCount=7)],
-    format="[%(asctime)s] [%(levelname)s] %(message)s",
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%dT%H:%M:%S')
-
 Logger = logging.getLogger()
 
 
+# ---------------------------------------------------------------------------
+# DSMR P1 field definitions
+# https://www.netbeheernederland.nl/_upload/Files/Slimme_meter_15_32ffe3cc38.pdf
+# ---------------------------------------------------------------------------
 class Drm4(Enum):
-    """ https://www.netbeheernederland.nl/_upload/Files/Slimme_meter_15_32ffe3cc38.pdf """
-    VERSION = (1, 3, 0, 2, 8)  # unused
-
+    VERSION = (1, 3, 0, 2, 8)
     TIMESTAMP_ELECTRICITY = (0, 0, 1, 0, 0)
-
-    EQ_ID = (0, 0, 96, 1, 1)  # unused
-
+    EQ_ID = (0, 0, 96, 1, 1)
     READ_DEL_T1_KWH = (1, 0, 1, 8, 1)
     READ_DEL_T2_KWH = (1, 0, 1, 8, 2)
+    READ_RET_T1_KWH = (1, 0, 2, 8, 1)
+    READ_RET_T2_KWH = (1, 0, 2, 8, 2)
     TARIFF_INDICATOR = (0, 0, 96, 14, 0)
-    POWER_DEL_KW = (1, 0, 21, 7, 0)
-    CURRENT_A = (1, 0, 31, 7, 0)
+    POWER_DEL_TOTAL_KW = (1, 0, 1, 7, 0)
+    POWER_RET_TOTAL_KW = (1, 0, 2, 7, 0)
+    POWER_FAIL_COUNT = (0, 0, 96, 7, 9)
+    POWER_FAIL_LONG_COUNT = (0, 0, 96, 7, 21)
+    POWER_FAIL_LOG = (1, 0, 99, 97, 0)
+    VOLTAGE_SAGS_L1 = (1, 0, 32, 32, 0)
+    VOLTAGE_SWELLS_L1 = (1, 0, 32, 36, 0)
+    TEXT_MESSAGE_CODES = (0, 0, 96, 13, 1)
+    TEXT_MESSAGE = (0, 0, 96, 13, 0)
+    POWER_DEL_L1_KW = (1, 0, 21, 7, 0)
+    POWER_RET_L1_KW = (1, 0, 22, 7, 0)
+    CURRENT_L1_A = (1, 0, 31, 7, 0)
+    GAS_DEVICE_TYPE = (0, 1, 24, 1, 0)
+    GAS_EQ_ID = (0, 1, 96, 1, 0)
     GAS_T_VOLUME_M3 = (0, 1, 24, 2, 1)
 
-    # These we receive but we don't actually use!
-    UNUSED_01 = (1, 0, 2, 8, 1)
-    UNUSED_02 = (1, 0, 2, 8, 2)
-    UNUSED_03 = (1, 0, 1, 7, 0)
-    UNUSED_04 = (1, 0, 2, 7, 0)
-    UNUSED_05 = (0, 0, 96, 7, 9)
-    UNUSED_06 = (0, 0, 96, 7, 21)
-    UNUSED_07 = (1, 0, 99, 97, 0)
-    UNUSED_08 = (1, 0, 32, 32, 0)
-    UNUSED_09 = (1, 0, 32, 36, 0)
-    UNUSED_10 = (0, 0, 96, 13, 1)
-    UNUSED_11 = (0, 0, 96, 13, 0)
-    UNUSED_12 = (1, 0, 22, 7, 0)
-    UNUSED_13 = (0, 1, 24, 1, 0)
-    UNUSED_14 = (0, 1, 96, 1, 0)
+
+def _first_numeric(values: list[str]) -> float | None:
+    """Return the first numeric value extracted from a parenthesised group list."""
+    for v in values:
+        if m := numeric_re.match(v):
+            return float(m.group())
+    return None
 
 
-class Drm4ReaderUploader:
-    SerialConfig = dict(port='/dev/ttyUSB0', baudrate=115200, timeout=20)
-    InfluxDbConfig = dict(username='admin', password='admin', database='p1data')
+def _parse_dt_to_utc(raw: str) -> datetime:
+    dt_naive = datetime.strptime(str(int(float(raw))), DRM4_DT_FMT)
+    return TZ_DRM4.localize(dt_naive).astimezone(TZ_INFLUX)
 
-    InfLoopInterval = 0
 
+# ---------------------------------------------------------------------------
+# Publisher
+# ---------------------------------------------------------------------------
+class P1Publisher:
     def __init__(self):
-        self.serial = serial.Serial(**self.SerialConfig)
-        self.influx = InfluxDBClient(**self.InfluxDbConfig)
+        self._serial = serial.Serial(
+            port=SERIAL_PORT, baudrate=SERIAL_BAUD, timeout=SERIAL_TIMEOUT)
+        self._channel = None
+        self._connection = None
+        self._connect_rabbitmq()
 
-        self.last_dt_gas = None
-        self.last_dt_electricity = None
+    # ------------------------------------------------------------------
+    # RabbitMQ helpers
+    # ------------------------------------------------------------------
+    def _connect_rabbitmq(self):
+        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+        params = pika.ConnectionParameters(
+            host=RABBITMQ_HOST,
+            port=RABBITMQ_PORT,
+            credentials=credentials,
+            heartbeat=60,
+            blocked_connection_timeout=30,
+        )
+        while True:
+            try:
+                self._connection = pika.BlockingConnection(params)
+                self._channel = self._connection.channel()
+                self._channel.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
+                logging.info('Connected to RabbitMQ at %s:%d', RABBITMQ_HOST, RABBITMQ_PORT)
+                return
+            except pika.exceptions.AMQPConnectionError as exc:
+                logging.warning('RabbitMQ not ready (%s), retrying in 5 s …', exc)
+                time.sleep(5)
 
-        self._init_datetime_fields()
+    def _publish(self, payload: dict):
+        body = json.dumps(payload, default=str)
+        properties = pika.BasicProperties(
+            delivery_mode=pika.DeliveryMode.Persistent)
+        try:
+            self._channel.basic_publish(
+                exchange='',
+                routing_key=RABBITMQ_QUEUE,
+                body=body,
+                properties=properties,
+            )
+        except pika.exceptions.AMQPError:
+            logging.warning('Lost RabbitMQ connection, reconnecting …')
+            self._connect_rabbitmq()
+            self._channel.basic_publish(
+                exchange='',
+                routing_key=RABBITMQ_QUEUE,
+                body=body,
+                properties=properties,
+            )
 
-    def _init_datetime_fields(self):
-        if res := list(self.influx.query('SELECT time, gas_time FROM p1 ORDER BY time DESC LIMIT 1').get_points('p1')):
-            self.last_dt_gas = TZ_INFLUX.localize(datetime.strptime(res[0]['gas_time'], INFLUX_DT_FMT))
-
-        if res := list(
-                self.influx.query('SELECT time, power_delivered_w FROM p1 ORDER BY time DESC LIMIT 1').get_points(
-                    'p1')):
-            self.last_dt_electricity = TZ_INFLUX.localize(datetime.strptime(res[0]['time'], INFLUX_DT_FMT))
-
-    def parse_telegram(self):
-        t_content = []
-        telegram_info = {}
-
+    # ------------------------------------------------------------------
+    # Telegram parsing
+    # ------------------------------------------------------------------
+    def parse_telegram(self) -> dict | None:
+        """Read one complete P1 telegram from the serial port and return its data."""
+        t_content: list[str] = []
+        telegram_info: dict = {}
         awaiting_start = True
 
         while True:
-            line = self.serial.readline().decode('utf-8').strip()
-
-            # Preparing CRC
+            line = self._serial.readline().decode('utf-8').strip()
             t_content.append(line)
 
             if not line:
@@ -112,112 +168,164 @@ class Drm4ReaderUploader:
                 if line.startswith('/'):
                     awaiting_start = False
                 else:
-                    logging.debug(f'Ignored line while waiting for start char: "{line}"')
+                    logging.debug('Ignored line while waiting for start char: "%s"', line)
                 continue
 
             if line.startswith('!'):
                 t_content.append('!')
                 data = DRM4_LINE_SEP.join(t_content)
                 crc_calc = hex(drm4_crc(data.encode('utf-8')))
-                logging.info(f'End of telegram reached. Sending info ... {crc_calc}{line}')
+                logging.info('End of telegram. CRC: %s%s', crc_calc, line)
                 break
 
             if not (drm4_id := tel_id_re.search(line)):
-                logging.warning(f'Ignoring unknown DRM4 ID in: "{line}"')
+                logging.debug('No OBIS id in line: "%s"', line)
                 continue
 
             try:
                 field = Drm4(tuple(int(x) for x in drm4_id.groups()))
-
             except ValueError:
-                logging.warning(f'Ignoring non-implemented field {drm4_id[0]}. Line: "{line}".')
+                logging.debug('Unknown OBIS id %s – skipping.', drm4_id[0])
                 continue
 
-            if g_content := tel_content_re_extra.search(line):
-                converted = [float(x) for x in g_content.groups('nan') if x]
-                if len(converted) < 2:
-                    converted = [float('nan'), converted[0]]  # The 1st match failed, we make it NaN
+            values = tel_values_re.findall(line)  # all (...) groups on the line
 
-                value, extra = converted
+            self._handle_field(field, values, telegram_info)
 
-            else:
-                logging.warning(f'Read info field {field}. {line}.')
-                continue
+        return telegram_info or None
 
-            match field:
+    def _handle_field(self, field: Drm4, values: list[str], info: dict):
+        """Parse one field and store result in *info*."""
+        match field:
 
-                case Drm4.TIMESTAMP_ELECTRICITY:
-                    dt = self._parse_dt_to_utc(value)
-                    if self.last_dt_electricity and dt <= self.last_dt_electricity:
-                        logging.warning(
-                            f'Ignoring telegram. Timestamp is repeated /old: {dt} <= {self.last_dt_electricity}')
-                        telegram_info = None
-                        break
+            case Drm4.TIMESTAMP_ELECTRICITY:
+                if values:
+                    info['dt_electricity'] = _parse_dt_to_utc(values[0])
 
-                    telegram_info['dt_electricity'] = dt
+            # Meter readings – kWh
+            case Drm4.READ_DEL_T1_KWH:
+                if (v := _first_numeric(values)) is not None:
+                    info['energy_t1'] = v
+            case Drm4.READ_DEL_T2_KWH:
+                if (v := _first_numeric(values)) is not None:
+                    info['energy_t2'] = v
+            case Drm4.READ_RET_T1_KWH:
+                if (v := _first_numeric(values)) is not None:
+                    info['energy_ret_t1'] = v
+            case Drm4.READ_RET_T2_KWH:
+                if (v := _first_numeric(values)) is not None:
+                    info['energy_ret_t2'] = v
 
-                case Drm4.READ_DEL_T1_KWH:
-                    telegram_info['energy_t1'] = float(value)
-                case Drm4.READ_DEL_T2_KWH:
-                    telegram_info['energy_t2'] = float(value)
+            # Tariff
+            case Drm4.TARIFF_INDICATOR:
+                if (v := _first_numeric(values)) is not None:
+                    info['tariff_indicator'] = int(v)
 
-                case Drm4.TARIFF_INDICATOR:
-                    telegram_info['tariff_indicator'] = int(value)
+            # Instantaneous power – converted to W
+            case Drm4.POWER_DEL_TOTAL_KW:
+                if (v := _first_numeric(values)) is not None:
+                    info['power_del_total_w'] = round(1000 * v, 3)
+            case Drm4.POWER_RET_TOTAL_KW:
+                if (v := _first_numeric(values)) is not None:
+                    info['power_ret_total_w'] = round(1000 * v, 3)
+            case Drm4.POWER_DEL_L1_KW:
+                if (v := _first_numeric(values)) is not None:
+                    info['power_delivered_w'] = round(1000 * v, 3)
+            case Drm4.POWER_RET_L1_KW:
+                if (v := _first_numeric(values)) is not None:
+                    info['power_ret_l1_w'] = round(1000 * v, 3)
 
-                case Drm4.POWER_DEL_KW:
-                    telegram_info['power_delivered_w'] = 1000 * float(value)
+            # Current
+            case Drm4.CURRENT_L1_A:
+                if (v := _first_numeric(values)) is not None:
+                    info['current_delivered'] = v
 
-                case Drm4.CURRENT_A:
-                    telegram_info['current_delivered'] = float(value)
+            # Failure counters
+            case Drm4.POWER_FAIL_COUNT:
+                if (v := _first_numeric(values)) is not None:
+                    info['power_fail_count'] = int(v)
+            case Drm4.POWER_FAIL_LONG_COUNT:
+                if (v := _first_numeric(values)) is not None:
+                    info['power_fail_long_count'] = int(v)
+            case Drm4.POWER_FAIL_LOG:
+                # First value is the number of log entries
+                if (v := _first_numeric(values)) is not None:
+                    info['power_fail_log_count'] = int(v)
 
-                case Drm4.GAS_T_VOLUME_M3:
-                    dt = self._parse_dt_to_utc(value)
+            # Voltage quality
+            case Drm4.VOLTAGE_SAGS_L1:
+                if (v := _first_numeric(values)) is not None:
+                    info['voltage_sags_l1'] = int(v)
+            case Drm4.VOLTAGE_SWELLS_L1:
+                if (v := _first_numeric(values)) is not None:
+                    info['voltage_swells_l1'] = int(v)
 
-                    if self.last_dt_gas and dt <= self.last_dt_gas:
-                        # Ignoring Gas info. Timestamp is repeated
-                        continue
+            # Gas: values = [timestamp_str, volume_str]
+            case Drm4.GAS_T_VOLUME_M3:
+                if len(values) >= 2:
+                    gas_dt = _parse_dt_to_utc(values[0])
+                    if (v := _first_numeric([values[1]])) is not None:
+                        info['gas'] = v
+                        info['gas_time'] = gas_dt.strftime(INFLUX_DT_FMT)
 
-                    telegram_info['gas'] = float(extra)
-                    telegram_info['gas_time'] = dt.strftime(INFLUX_DT_FMT)
+            # String / identifier fields (skip if empty)
+            case Drm4.EQ_ID:
+                if values and values[0]:
+                    info['eq_id'] = values[0]
+            case Drm4.GAS_EQ_ID:
+                if values and values[0]:
+                    info['gas_eq_id'] = values[0]
+            case Drm4.GAS_DEVICE_TYPE:
+                if (v := _first_numeric(values)) is not None:
+                    info['gas_device_type'] = int(v)
+            case Drm4.TEXT_MESSAGE_CODES:
+                if values and values[0]:
+                    info['text_msg_codes'] = values[0]
+            case Drm4.TEXT_MESSAGE:
+                if values and values[0]:
+                    info['text_msg'] = values[0]
 
-        return telegram_info
+            # VERSION – informational only, not stored
+            case Drm4.VERSION:
+                pass
 
-    def loop(self):
-        """ Runs `run` in a loop"""
-        while True:
-            self.run()
-            if self.InfLoopInterval:
-                time.sleep(self.InfLoopInterval)
-
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
     def run(self):
         fields = self.parse_telegram()
-
         if not fields:
-            raise RuntimeError('Unknown error: datagram could not be parsed')
+            logging.warning('Empty telegram, skipping.')
+            return
 
-        if not (last_dt_electricity := fields.pop('dt_electricity', self.last_dt_electricity)):
-            raise RuntimeError('Unknown error: datagram could not be parsed', fields)
+        dt_electricity = fields.pop('dt_electricity', None)
+        if not dt_electricity:
+            logging.warning('Telegram has no electricity timestamp, skipping.')
+            return
 
-        tags = dict(tariff=fields.pop('tariff_indicator', None))
+        tags = {'tariff': str(fields.pop('tariff_indicator', ''))}
 
-        # Create the JSON data structure for InfluxDB
-        data = {
-            "measurement": IDB_MEASUREMENT,
-            "fields": fields,
-            "tags": tags,
-            "time": last_dt_electricity
+        payload = {
+            'measurement': IDB_MEASUREMENT,
+            'time': dt_electricity.strftime(INFLUX_DT_FMT),
+            'tags': tags,
+            'fields': fields,
         }
 
-        # Send the JSON data to InfluxDB
-        self.influx.write_points([data], time_precision='s')
-        logging.info(data)
+        self._publish(payload)
+        logging.info('Published: %s', payload)
 
-    @staticmethod
-    def _parse_dt_to_utc(dt_naive_f: str):
-        dt_naive = datetime.strptime(str(int(dt_naive_f)), DRM4_DT_FMT)
-        local = TZ_DRM4.localize(dt_naive)
-        return local.astimezone(pytz.utc)
+    def loop(self):
+        while True:
+            try:
+                self.run()
+            except serial.SerialException as exc:
+                logging.error('Serial error: %s – retrying in 5 s', exc)
+                time.sleep(5)
+            except Exception as exc:
+                logging.exception('Unexpected error: %s', exc)
+                time.sleep(1)
 
 
 if __name__ == '__main__':
-    Drm4ReaderUploader().loop()
+    P1Publisher().loop()

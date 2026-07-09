@@ -1,5 +1,8 @@
-FROM python:3.10
+FROM python:3.13-slim
 
-ADD p1serial.py /
-RUN pip install pyserial influxdb
-CMD [ "python","-u","./p1serial.py" ]
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY *.py .
+
+CMD ["python", "-u", "p1serial.py"]
