@@ -1,0 +1,65 @@
+services:
+  rabbitmq:
+    image: rabbitmq:4-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  influxdb:
+    image: influxdb:1.8
+    restart: unless-stopped
+    environment:
+      INFLUXDB_DB: ${INFLUX_DATABASE:-p1data}
+      INFLUXDB_ADMIN_USER: ${INFLUX_USERNAME:-admin}
+      INFLUXDB_ADMIN_PASSWORD: ${INFLUX_PASSWORD:-admin}
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb
+
+  p1-reader:
+    build:
+      context: ./p1serial_docker
+    restart: unless-stopped
+    depends_on:
+      - rabbitmq
+    environment:
+      APP_MODE: publish
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      RABBITMQ_QUEUE: ${RABBITMQ_QUEUE:-p1data}
+      SERIAL_PORT: /dev/ttyUSB0
+      SERIAL_BAUDRATE: ${SERIAL_BAUDRATE:-115200}
+      SERIAL_TIMEOUT: ${SERIAL_TIMEOUT:-20}
+    devices:
+      - ${P1_SERIAL_DEVICE:-/dev/ttyUSB0}:/dev/ttyUSB0
+
+  p1-ingestor:
+    build:
+      context: ./p1serial_docker
+    restart: unless-stopped
+    depends_on:
+      - rabbitmq
+      - influxdb
+    environment:
+      APP_MODE: consume
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      RABBITMQ_QUEUE: ${RABBITMQ_QUEUE:-p1data}
+      INFLUX_HOST: influxdb
+      INFLUX_PORT: 8086
+      INFLUX_USERNAME: ${INFLUX_USERNAME:-admin}
+      INFLUX_PASSWORD: ${INFLUX_PASSWORD:-admin}
+      INFLUX_DATABASE: ${INFLUX_DATABASE:-p1data}
+      INFLUX_MEASUREMENT: ${INFLUX_MEASUREMENT:-p1data}
+
+volumes:
+  influxdb-data:

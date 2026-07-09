@@ -1,0 +1,5 @@
+crcmod==1.7
+influxdb==5.3.2
+pika==1.4.1
+pyserial==3.5
+pytz==2026.2
