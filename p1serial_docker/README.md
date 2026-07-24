@@ -1,24 +1,25 @@
-# built
-Create a (Docker) image, see attached Dockerfile  
-```
-docker build -t p1serial/p1serial .
+# build
+
+```bash
+docker build -t p1serial/p1serial ./p1serial_docker
 ```
 
-# run
-Run on the same host (network = host) as influxDB    
+# compose
+
+Run the full stack from the repository root:
+
+```bash
+cd .
+docker compose up -d --build
 ```
-docker run \
- --restart unless-stopped \
- --detach \
- --net=host \
- --name=p1serial \
- --device /dev/ttyUSB0:/dev/ttyUSB0 \
- -e PYTHONUNBUFFERED=0 \
- p1serial/p1serial
-```
+
+# services
+
+- `p1-reader` publishes raw telegram payloads into RabbitMQ
+- `p1-ingestor` consumes the queue and writes all parsed DSMR fields into InfluxDB
 
 # check
-JSON string is being logged in container  
-```
-docker logs p1serial
+
+```bash
+docker compose logs -f p1-reader p1-ingestor
 ```
