@@ -49,6 +49,21 @@ class Drm4(Enum):
 
     EQ_ID = (0, 0, 96, 1, 1)  # unused
 
+    POWER_IMPORT_KW = (1, 0, 1, 7, 0)
+    POWER_EXPORT_KW = (1, 0, 2, 7, 0)
+    
+    POWER_IMPORT_L1_KW = (1, 0, 21, 7, 0)
+    POWER_EXPORT_L1_KW = (1, 0, 22, 7, 0)
+    CURRENT_L1_A = (1, 0, 31, 7, 0)
+    
+    POWER_IMPORT_L2_KW = (1, 0, 41, 7, 0)
+    POWER_EXPORT_L2_KW = (1, 0, 42, 7, 0)
+    CURRENT_L2_A = (1, 0, 51, 7, 0)
+    
+    POWER_IMPORT_L3_KW = (1, 0, 61, 7, 0)
+    POWER_EXPORT_L3_KW = (1, 0, 62, 7, 0)
+    CURRENT_L3_A = (1, 0, 71, 7, 0)
+    
     READ_DEL_T1_KWH = (1, 0, 1, 8, 1)
     READ_DEL_T2_KWH = (1, 0, 1, 8, 2)
     TARIFF_INDICATOR = (0, 0, 96, 14, 0)
@@ -59,10 +74,6 @@ class Drm4(Enum):
     # Solar panels!
     READ_RET_T1_KWH = (1, 0, 2, 8, 1)
     READ_RET_T2_KWH = (1, 0, 2, 8, 2)
-
-    # These we receive but we don't actually use!
-    POWER_DEL_ACTUAL_KW = (1, 0, 41, 7, 0)
-    POWER_RET_ACTUAL_KW = (1, 0, 42, 7, 0)
 
     UNUSED_05 = (0, 0, 96, 7, 9)
     UNUSED_06 = (0, 0, 96, 7, 21)
@@ -137,20 +148,48 @@ def parse_telegram(ser, last_timestamp_electr, last_timestamp_gas):
             telegram_info['dt_electricity'] = dt
 
         elif field == Drm4.READ_DEL_T1_KWH:
-            telegram_info['energy_t1'] = float(value)
+            telegram_info['energy_import_t1_kwh'] = float(value)
+            telegram_info['energy_t1'] = float(value)  # legacy
+
         elif field == Drm4.READ_DEL_T2_KWH:
-            telegram_info['energy_t2'] = float(value)
+            telegram_info['energy_import_t2_kwh'] = float(value)
+            telegram_info['energy_t2'] = float(value)  # legacy
 
         elif field == Drm4.TARIFF_INDICATOR:
             telegram_info['tariff_indicator'] = int(value)
 
-        elif field == Drm4.POWER_DEL_ACTUAL_KW:
-            telegram_info['power_delivered_w'] = 1000 * float(value)
-        elif field == Drm4.POWER_RET_ACTUAL_KW:
-            telegram_info['power_returned_w'] = 1000 * float(value)
-
+        elif field == Drm4.POWER_IMPORT_KW:
+            telegram_info['power_import_w'] = 1000 * value
+        
+        elif field == Drm4.POWER_EXPORT_KW:
+            telegram_info['power_export_w'] = 1000 * value
+        
+        elif field == Drm4.POWER_IMPORT_L1_KW:
+            telegram_info['power_import_l1_w'] = 1000 * value
+            telegram_info['power_delivered_w'] = 1000 * value  # legacy alias
+        
+        elif field == Drm4.POWER_EXPORT_L1_KW:
+            telegram_info['power_export_l1_w'] = 1000 * value
+        
+        elif field == Drm4.POWER_IMPORT_L2_KW:
+            telegram_info['power_import_l2_w'] = 1000 * value
+        
+        elif field == Drm4.POWER_EXPORT_L2_KW:
+            telegram_info['power_export_l2_w'] = 1000 * value
+        
+        elif field == Drm4.POWER_IMPORT_L3_KW:
+            telegram_info['power_import_l3_w'] = 1000 * value
+        
+        elif field == Drm4.POWER_EXPORT_L3_KW:
+            telegram_info['power_export_l3_w'] = 1000 * value
         elif field == Drm4.CURRENT_A:
             telegram_info['current_delivered'] = float(value)
+
+        elif field == Drm4.READ_RET_T1_KWH:
+            telegram_info['energy_export_t1_kwh'] = float(value)
+        
+        elif field == Drm4.READ_RET_T2_KWH:
+            telegram_info['energy_export_t2_kwh'] = float(value)
 
         elif field == Drm4.GAS_T_VOLUME_M3:
             dt = parse_dt_to_utc(value)
@@ -184,11 +223,11 @@ def main():
 
 
     last_dt_gas = None
-    if res := list(local_client.query('SELECT time, gas_time FROM p1 ORDER BY time DESC LIMIT 1').get_points('p1')):
+    if res := list(local_client.query('SELECT time, gas_time FROM p1data ORDER BY time DESC LIMIT 1').get_points('p1')):
         last_dt_gas = TZ_INFLUX.localize(datetime.strptime(res[0]['gas_time'], INFLUX_DT_FMT))
 
     last_dt_electricity = None
-    if res := list(local_client.query('SELECT time, power_delivered_w FROM p1 ORDER BY time DESC LIMIT 1').get_points('p1')):
+    if res := list(local_client.query('SELECT time, power_delivered_w FROM p1data ORDER BY time DESC LIMIT 1').get_points('p1')):
         last_dt_electricity = TZ_INFLUX.localize(datetime.strptime(res[0]['time'], INFLUX_DT_FMT))
 
     while True:
