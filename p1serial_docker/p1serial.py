@@ -55,36 +55,38 @@ class Drm4(Enum):
     POWER_IMPORT_L1_KW = (1, 0, 21, 7, 0)
     POWER_EXPORT_L1_KW = (1, 0, 22, 7, 0)
     CURRENT_L1_A = (1, 0, 31, 7, 0)
+    VOLTAGE_L1_V = (1, 0, 32, 7, 0)
     
     POWER_IMPORT_L2_KW = (1, 0, 41, 7, 0)
     POWER_EXPORT_L2_KW = (1, 0, 42, 7, 0)
     CURRENT_L2_A = (1, 0, 51, 7, 0)
+    VOLTAGE_L2_V = (1, 0, 52, 7, 0)
     
     POWER_IMPORT_L3_KW = (1, 0, 61, 7, 0)
     POWER_EXPORT_L3_KW = (1, 0, 62, 7, 0)
     CURRENT_L3_A = (1, 0, 71, 7, 0)
+    VOLTAGE_L3_V = (1, 0, 72, 7, 0)
     
     READ_DEL_T1_KWH = (1, 0, 1, 8, 1)
     READ_DEL_T2_KWH = (1, 0, 1, 8, 2)
     TARIFF_INDICATOR = (0, 0, 96, 14, 0)
-    POWER_DEL_KW = (1, 0, 21, 7, 0)
-    CURRENT_A = (1, 0, 31, 7, 0)
+    #POWER_DEL_KW = (1, 0, 21, 7, 0)
     GAS_T_VOLUME_M3 = (0, 1, 24, 2, 1)
 
     # Solar panels!
     READ_RET_T1_KWH = (1, 0, 2, 8, 1)
     READ_RET_T2_KWH = (1, 0, 2, 8, 2)
 
-    UNUSED_05 = (0, 0, 96, 7, 9)
-    UNUSED_06 = (0, 0, 96, 7, 21)
-    UNUSED_07 = (1, 0, 99, 97, 0)
-    UNUSED_08 = (1, 0, 32, 32, 0)
-    UNUSED_09 = (1, 0, 32, 36, 0)
-    UNUSED_10 = (0, 0, 96, 13, 1)
-    UNUSED_11 = (0, 0, 96, 13, 0)
-    UNUSED_12 = (1, 0, 22, 7, 0)
-    UNUSED_13 = (0, 1, 24, 1, 0)
-    UNUSED_14 = (0, 1, 96, 1, 0)
+    #UNUSED_05 = (0, 0, 96, 7, 9)
+    #UNUSED_06 = (0, 0, 96, 7, 21)
+    #UNUSED_07 = (1, 0, 99, 97, 0)
+    #UNUSED_08 = (1, 0, 32, 32, 0)
+    #UNUSED_09 = (1, 0, 32, 36, 0)
+    #UNUSED_10 = (0, 0, 96, 13, 1)
+    #UNUSED_11 = (0, 0, 96, 13, 0)
+    #UNUSED_12 = (1, 0, 22, 7, 0)
+    #UNUSED_13 = (0, 1, 24, 1, 0)
+    #UNUSED_14 = (0, 1, 96, 1, 0)
 
 
 def parse_telegram(ser, last_timestamp_electr, last_timestamp_gas):
@@ -160,34 +162,40 @@ def parse_telegram(ser, last_timestamp_electr, last_timestamp_gas):
 
         elif field == Drm4.POWER_IMPORT_KW:
             telegram_info['power_import_w'] = 1000 * value
-        
         elif field == Drm4.POWER_EXPORT_KW:
             telegram_info['power_export_w'] = 1000 * value
         
         elif field == Drm4.POWER_IMPORT_L1_KW:
             telegram_info['power_import_l1_w'] = 1000 * value
             telegram_info['power_delivered_w'] = 1000 * value  # legacy alias
-        
         elif field == Drm4.POWER_EXPORT_L1_KW:
             telegram_info['power_export_l1_w'] = 1000 * value
-        
         elif field == Drm4.POWER_IMPORT_L2_KW:
             telegram_info['power_import_l2_w'] = 1000 * value
-        
         elif field == Drm4.POWER_EXPORT_L2_KW:
             telegram_info['power_export_l2_w'] = 1000 * value
-        
         elif field == Drm4.POWER_IMPORT_L3_KW:
-            telegram_info['power_import_l3_w'] = 1000 * value
-        
+            telegram_info['power_import_l3_w'] = 1000 * value        
         elif field == Drm4.POWER_EXPORT_L3_KW:
             telegram_info['power_export_l3_w'] = 1000 * value
-        elif field == Drm4.CURRENT_A:
-            telegram_info['current_delivered'] = float(value)
+
+        elif field == Drm4.CURRENT_L1_A:
+            telegram_info['current_delivered'] = float(value) # legacy alias
+            telegram_info['current_l1_a'] = float(value)
+        elif field == Drm4.CURRENT_L2_A:
+            telegram_info['current_l2_a'] = float(value)
+        elif field == Drm4.CURRENT_L3_A:
+            telegram_info['current_l3_a'] = float(value)
+
+        elif field == Drm4.VOLTAGE_L1_V:
+            telegram_info['voltage_l1_v'] = float(value)
+        elif field == Drm4.VOLTAGE_L2_V:
+            telegram_info['voltage_l2_v'] = float(value)
+        elif field == Drm4.VOLTAGE_L3_V:
+            telegram_info['voltage_l3_v'] = float(value)
 
         elif field == Drm4.READ_RET_T1_KWH:
             telegram_info['energy_export_t1_kwh'] = float(value)
-        
         elif field == Drm4.READ_RET_T2_KWH:
             telegram_info['energy_export_t2_kwh'] = float(value)
 
@@ -253,6 +261,7 @@ def main():
         }
 
         # Send the JSON data to InfluxDB
+        print(data)
 
         try:
             local_client.write_points([data], time_precision='s')
